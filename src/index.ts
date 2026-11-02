@@ -169,6 +169,7 @@ export class CopilotDriver implements AgentFactory {
             : this.config.model,
       },
       this.config.turnTimeoutMs,
+      this.config.permission,
     );
     const startup = new AbortController();
     const signal = AbortSignal.any([
@@ -281,6 +282,7 @@ export class CopilotDriver implements AgentFactory {
           agent.status !== "running"
         )
           return { kind: "reject" };
+        if (agent.permissions().fullAccess) return { kind: "approve-once" };
         const outcome = await this.ctx.approval.request({
           agent,
           toolName: `copilot:${request.kind}`,

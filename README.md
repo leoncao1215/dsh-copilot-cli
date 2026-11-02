@@ -100,8 +100,14 @@ Text/reasoning streams, assistant messages, root tool calls/results, turn
 completion, errors, and cancellation are translated into dsh events and its
 durable JSONL log. Pending inbox messages are persisted. Copilot permission
 requests go through dsh's approval service, and questions through its user-input
-service. Permissions are granted only for an explicit one-shot approval;
-unavailable answerers fail closed. Requests for permission can wait for a
+service. Normally, permissions require an explicit one-shot approval;
+unavailable answerers fail closed. Dsh's full-access combination
+(`danger-full-access` sandbox mode and `never` approval policy) automatically
+approves Copilot tool permission requests without prompting. `never` alone
+still rejects permission requests, and the driver's `permission: deny` overrides
+full access. The current effective policy is included with each Copilot prompt,
+and permission callbacks re-read it so changes apply to subsequent requests,
+including within a running turn. Requests for permission can wait for a
 connected browser to answer.
 
 ## Current boundaries
@@ -111,9 +117,11 @@ connected browser to answer.
 - Text prompts only. Attachments and dsh history forks are rejected explicitly.
   dsh rewind/compaction and native subagent management are not integrated.
 - Copilot owns tools, instructions, hooks, MCP, and execution policy. dsh's
-  native tool registry, sandbox modes, permission presets, and system-prompt
-  assembly are **not translated** into equivalent Copilot settings. A dsh
-  workspace-write badge is not a Copilot sandbox guarantee.
+  native tool registry, sandbox confinement, and system-prompt assembly are
+  **not translated** into equivalent Copilot settings. Only the full-access
+  mode/policy combination is mapped to automatic tool approval; a dsh
+  workspace-write badge is not a Copilot sandbox guarantee. Copilot runtime and
+  organization restrictions still apply.
 - One dsh step represents a complete SDK prompt execution, potentially including
   multiple model/tool iterations. Steering is queued for the next prompt, not
   injected into an in-progress Copilot model step.

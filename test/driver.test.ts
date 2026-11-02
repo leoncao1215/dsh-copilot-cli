@@ -9,6 +9,11 @@ import {
   joinAssistantStreamText,
 } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import {
+  SandboxPolicyService,
+  setSandboxMode,
+} from "@deepseek-ai/dsh-sandbox-policy";
+import { setApprovalPolicy } from "@deepseek-ai/dsh-user-approval";
 import type {
   SessionConfig,
   ResumeSessionConfig,
@@ -79,6 +84,7 @@ class FakeSession {
 class FakeRuntime implements Runtime {
   readonly sessions = new Map<string, FakeSession>();
   readonly configs: SessionConfig[] = [];
+  readonly resumeConfigs: ResumeSessionConfig[] = [];
   readonly resumed: string[] = [];
   async start() {}
   async stop() {}
@@ -93,9 +99,10 @@ class FakeRuntime implements Runtime {
   }
   async resumeSession(
     id: string,
-    _config: ResumeSessionConfig,
+    config: ResumeSessionConfig,
   ): Promise<RuntimeSession> {
     this.resumed.push(id);
+    this.resumeConfigs.push(config);
     const session = this.sessions.get(id);
     if (!session) throw new Error("Missing Copilot session");
     session.disconnected = false;
@@ -103,10 +110,13 @@ class FakeRuntime implements Runtime {
   }
 }
 
-async function fixture(t: { after: (callback: () => Promise<void>) => void }) {
+async function fixture(
+  t: { after: (callback: () => Promise<void>) => void },
+  config: Parameters<typeof harness>[2] = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "dsh-copilot-test-"));
   const runtime = new FakeRuntime();
-  const app = await harness(root, runtime);
+  const app = await harness(root, runtime, config);
   t.after(async () => {
     await app.dispose();
     await rm(root, { recursive: true, force: true });
@@ -174,7 +184,10 @@ test("projects streamed text and tool results, persists history, and resumes the
   );
   resumed.agent.followup(prompt("continue"));
   await resumed.agent.whenIdle();
-  assert.deepEqual(remote.prompts, ["inspect", "continue"]);
+  assert.deepEqual(
+    remote.prompts.map((text) => text.split("\n\n").at(-1)),
+    ["inspect", "continue"],
+  );
   const turns = resumed.agent.session
     .snapshotEvents()
     .filter((event) => event.type === "turn/start");
@@ -213,11 +226,20 @@ test("isolates sessions and serializes queued prompts within a session", async (
   await started.promise;
   b.agent.followup(prompt("b1"));
   await b.agent.whenIdle();
-  assert.deepEqual(first.prompts, ["a1"]);
-  assert.deepEqual(second.prompts, ["b1"]);
+  assert.deepEqual(
+    first.prompts.map((text) => text.split("\n\n").at(-1)),
+    ["a1"],
+  );
+  assert.deepEqual(
+    second.prompts.map((text) => text.split("\n\n").at(-1)),
+    ["b1"],
+  );
   release.resolve();
   await a.agent.whenIdle();
-  assert.deepEqual(first.prompts, ["a1", "a2"]);
+  assert.deepEqual(
+    first.prompts.map((text) => text.split("\n\n").at(-1)),
+    ["a1", "a2"],
+  );
   assert.equal(runtime.configs[0].workingDirectory, process.cwd());
   assert.equal(runtime.configs[1].workingDirectory, tmpdir());
 });
@@ -310,6 +332,162 @@ test("forwards active permission decisions and fails closed without an answerer"
     .filter((event) => event.type === "approval/decided")
     .map((event) => event.data.outcome);
   assert.deepEqual(outcomes, ["unavailable", "allowed-once", "rejected"]);
+});
+
+test("synchronizes full access, switch notices, live revocation, and resumed sessions", async (t) => {
+  const { ctx, runtime } = await fixture(t);
+  await ctx.plugin(SandboxPolicyService, { mode: "workspace-write" });
+  const handle = await ctx.agents.create({
+    sessionId: SessionId(randomUUID()),
+  });
+  const remote = runtime.sessions.get(copilotSessionId(handle.agent.id))!;
+  const callback = runtime.configs[0].onPermissionRequest!;
+  const request = (kind = "read") =>
+    callback({ kind } as never, { sessionId: handle.agent.id });
+  setSandboxMode(handle.agent.session, "danger-full-access");
+  ctx.approval.setPolicy(handle.agent, "never");
+  assert.deepEqual(await request(), { kind: "reject" });
+  const decisions: unknown[] = [];
+  remote.send = async () => {
+    for (const kind of ["read", "write", "shell"])
+      decisions.push(await request(kind));
+    setSandboxMode(handle.agent.session, "workspace-write");
+    decisions.push(await request());
+    setSandboxMode(handle.agent.session, "danger-full-access");
+  };
+  handle.agent.followup(prompt("use tools"));
+  await handle.agent.whenIdle();
+  assert.deepEqual(decisions, [
+    { kind: "approve-once" },
+    { kind: "approve-once" },
+    { kind: "approve-once" },
+    { kind: "reject" },
+  ]);
+  assert.match(remote.prompts[0], /Full access is enabled/);
+  assert.match(remote.prompts[0], /automatically approves/);
+  assert.match(
+    remote.prompts[0],
+    /current effective settings are stated above/,
+  );
+  assert.doesNotMatch(
+    remote.prompts[0],
+    /policy changed from "ask" to "never"/,
+  );
+  assert.match(remote.prompts[0], /use tools$/);
+  assert.equal(
+    handle.agent.session
+      .snapshotEvents()
+      .filter((event) => event.type === "approval/asked").length,
+    1,
+  );
+  await handle.dispose();
+  const resumed = await ctx.agents.resume({
+    resumeSessionId: handle.agent.id,
+  });
+  remote.send = async () => {
+    assert.deepEqual(
+      await runtime.resumeConfigs[0].onPermissionRequest!(
+        { kind: "shell" } as never,
+        { sessionId: resumed.agent.id },
+      ),
+      { kind: "approve-once" },
+    );
+  };
+  resumed.agent.followup(prompt("continue with full access"));
+  await resumed.agent.whenIdle();
+  assert.match(remote.prompts.at(-1)!, /Full access is enabled/);
+
+  setSandboxMode(resumed.agent.session, "workspace-write");
+  ctx.approval.setPolicy(resumed.agent, "ask");
+  remote.send = async () => {
+    assert.deepEqual(
+      await runtime.resumeConfigs[0].onPermissionRequest!(
+        { kind: "write" } as never,
+        { sessionId: resumed.agent.id },
+      ),
+      { kind: "reject" },
+    );
+  };
+  resumed.agent.followup(prompt("use normal approvals"));
+  await resumed.agent.whenIdle();
+  assert.match(remote.prompts.at(-1)!, /Approval policy: ask/);
+  assert.doesNotMatch(remote.prompts.at(-1)!, /Full access is enabled/);
+});
+
+test("does not interpret never, sandbox mode alone, or a full-access label as a grant", async (t) => {
+  for (const scenario of [
+    { mode: undefined, policy: "never" },
+    { mode: "read-only", policy: "never" },
+    { mode: "workspace-write", policy: "never" },
+    { mode: "danger-full-access", policy: "ask" },
+    { mode: "danger-full-access", policy: "never", permission: "deny" },
+  ] as const) {
+    await t.test(JSON.stringify(scenario), async (t) => {
+      const { ctx, runtime } = await fixture(t, {
+        permission: "permission" in scenario ? scenario.permission : "ask",
+      });
+      if (scenario.mode)
+        await ctx.plugin(SandboxPolicyService, { mode: scenario.mode });
+      const handle = await ctx.agents.create({
+        sessionId: SessionId(randomUUID()),
+      });
+      handle.agent.session.append("permission/preset", {
+        preset: "danger-full-access",
+      });
+      setApprovalPolicy(handle.agent.session, scenario.policy);
+      const remote = runtime.sessions.get(copilotSessionId(handle.agent.id))!;
+      remote.send = async () => {
+        assert.deepEqual(
+          await runtime.configs[0].onPermissionRequest!(
+            { kind: "shell" } as never,
+            { sessionId: handle.agent.id },
+          ),
+          { kind: "reject" },
+        );
+      };
+      handle.agent.followup(prompt("try tools"));
+      await handle.agent.whenIdle();
+      assert.doesNotMatch(remote.prompts[0], /Full access is enabled/);
+    });
+  }
+});
+
+test("keeps full-access grants session-local and rejects them after cancellation", async (t) => {
+  const { ctx, runtime } = await fixture(t);
+  await ctx.plugin(SandboxPolicyService, { mode: "danger-full-access" });
+  const full = await ctx.agents.create({
+    sessionId: SessionId(randomUUID()),
+  });
+  const restricted = await ctx.agents.create({
+    sessionId: SessionId(randomUUID()),
+  });
+  setApprovalPolicy(full.agent.session, "never");
+  const remote = runtime.sessions.get(copilotSessionId(full.agent.id))!;
+  remote.send = async () => {
+    full.agent.cancel({ kind: "user" });
+    assert.deepEqual(
+      await runtime.configs[0].onPermissionRequest!(
+        { kind: "shell" } as never,
+        { sessionId: full.agent.id },
+      ),
+      { kind: "reject" },
+    );
+  };
+  full.agent.followup(prompt("cancel"));
+  await full.agent.whenIdle();
+  const other = runtime.sessions.get(copilotSessionId(restricted.agent.id))!;
+  other.send = async () => {
+    assert.deepEqual(
+      await runtime.configs[1].onPermissionRequest!(
+        { kind: "shell" } as never,
+        { sessionId: restricted.agent.id },
+      ),
+      { kind: "reject" },
+    );
+  };
+  restricted.agent.followup(prompt("unattended"));
+  await restricted.agent.whenIdle();
+  assert.doesNotMatch(other.prompts[0], /Full access is enabled/);
 });
 
 test("drains late Copilot creation when its owner is disposed before publication", async (t) => {

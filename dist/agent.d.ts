@@ -9,6 +9,7 @@ export declare class CopilotAgent implements Agent {
     readonly session: Session;
     readonly options: AgentOptions;
     private readonly timeoutMs;
+    private readonly permission;
     readonly id: import("@deepseek-ai/dsh-session").SessionId;
     readonly scope: Scope;
     readonly ctx: Context;
@@ -24,8 +25,12 @@ export declare class CopilotAgent implements Agent {
     private turn;
     private cwd?;
     status: "idle" | "running";
-    constructor(ctx: Context, session: Session, options: AgentOptions, timeoutMs: number);
+    constructor(ctx: Context, session: Session, options: AgentOptions, timeoutMs: number, permission?: "ask" | "deny");
     get signal(): AbortSignal | undefined;
+    permissions(): {
+        fullAccess: boolean;
+        context: string;
+    };
     start(): void;
     send(message: UserMessage, target: InboxTarget, wakeup: boolean): void;
     followup(message: UserMessage): void;

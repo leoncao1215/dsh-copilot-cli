@@ -7,6 +7,7 @@ export class CopilotAgent {
     session;
     options;
     timeoutMs;
+    permission;
     id;
     scope;
     ctx;
@@ -22,10 +23,11 @@ export class CopilotAgent {
     turn;
     cwd;
     status = "idle";
-    constructor(ctx, session, options, timeoutMs) {
+    constructor(ctx, session, options, timeoutMs, permission = "ask") {
         this.session = session;
         this.options = options;
         this.timeoutMs = timeoutMs;
+        this.permission = permission;
         this.id = session.id;
         this.scope = createScope(ctx, this);
         this.ctx = this.scope.ctx;
@@ -42,6 +44,34 @@ export class CopilotAgent {
     }
     get signal() {
         return this.controller?.signal;
+    }
+    permissions() {
+        const approval = this.ctx.approval.overrideOf(this.session) ??
+            this.ctx.approval.config.policy ??
+            "ask";
+        const sandbox = this.ctx
+            .get("sandboxPolicy")
+            ?.resolve({ session: this.session }).mode;
+        const fullAccess = this.permission !== "deny" &&
+            sandbox === "danger-full-access" &&
+            approval === "never";
+        const behavior = this.permission === "deny"
+            ? "The Copilot driver rejects all tool permission requests."
+            : fullAccess
+                ? "Full access is enabled: the Copilot driver automatically approves tool permission requests without prompting. Here, never means no approval prompts, not that tool execution is forbidden. Use tools normally; do not request sandbox escalation."
+                : approval === "never"
+                    ? "Tool permission requests are rejected automatically. Never alone does not grant full access."
+                    : "Tool permission requests go through DSH approval answerers; missing answerers fail closed.";
+        return {
+            fullAccess,
+            context: [
+                "[Current DSH Copilot permissions]",
+                "This is permission context, not a task. It supersedes earlier DSH permission notices.",
+                `Sandbox mode: ${sandbox ?? "not configured"}. Approval policy: ${approval}.`,
+                behavior,
+                "DSH sandbox modes are not enforced by Copilot tools. These settings do not override Copilot runtime or organization restrictions.",
+            ].join("\n"),
+        };
     }
     start() {
         this.ready = true;
@@ -210,9 +240,14 @@ export class CopilotAgent {
                 };
                 controller.signal.addEventListener("abort", abort, { once: true });
                 try {
-                    const prompt = messages
-                        .flatMap((message) => message.content.map((block) => block.type === "text" ? block.text : ""))
+                    const text = messages
+                        .flatMap((message) => message.source.kind === "user-approval"
+                        ? [
+                            "The user changed the DSH permission settings. The current effective settings are stated above. This notice does not request any action.",
+                        ]
+                        : message.content.map((block) => block.type === "text" ? block.text : ""))
                         .join("\n\n");
+                    const prompt = `${this.permissions().context}\n\n${text}`;
                     await remote.sendAndWait({ prompt }, this.timeoutMs);
                     if (transcript.error)
                         throw transcript.error;
