@@ -11,6 +11,10 @@ import { copilotSessionId, resolveCliPath } from "../dist/runtime.js";
 import { root, writePatch } from "./profile.mjs";
 
 const require = createRequire(import.meta.url);
+const installPlugin = process.argv.includes("--install-plugin");
+const installSpec =
+  process.env.DSH_COPILOT_INSTALL_SPEC ||
+  "https://github.com/leoncao1215/dsh-copilot-cli";
 const bin = join(
   dirname(require.resolve("@deepseek-ai/dsh/package.json")),
   "lib",
@@ -22,8 +26,10 @@ const workspace = join(home, "workspace");
 await mkdir(workspace);
 const marker = `DSH_COPILOT_${randomUUID().replaceAll("-", "")}`;
 await writeFile(join(workspace, "marker.txt"), marker);
-const patch = await writePatch(home);
-const overlay = JSON.parse(await readFile(patch, "utf8"));
+const patch = installPlugin
+  ? join(home, "smoke.patch.json")
+  : await writePatch(home);
+const overlay = installPlugin ? [] : JSON.parse(await readFile(patch, "utf8"));
 overlay.push({
   insert: [
     {
@@ -174,6 +180,44 @@ async function send(rpc, text) {
 
 try {
   let rpc = await start();
+  if (installPlugin) {
+    let installed = await rpc("pluginManager/installBundle", {
+      spec: installSpec,
+      options: { enabled: true },
+    });
+    if (
+      installed.packageResult?.kind === "build-blocked" &&
+      installed.pendingBuilds?.length
+    ) {
+      installed = await rpc("pluginManager/installBundle", {
+        spec: installSpec,
+        options: { enabled: true, approvedBuilds: installed.pendingBuilds },
+      });
+    }
+    assert.ok(
+      ["applied", "restart-required"].includes(installed.application),
+      JSON.stringify(installed),
+    );
+    assert.equal(installed.bundle, "dsh-agent-copilot");
+    const bundles = await rpc("pluginManager/listBundles", {});
+    assert.ok(
+      bundles.some(
+        (bundle) =>
+          bundle.name === "dsh-agent-copilot" &&
+          bundle.installed &&
+          bundle.enabled &&
+          !bundle.error,
+      ),
+      JSON.stringify(
+        bundles.find((bundle) => bundle.name === "dsh-agent-copilot"),
+      ),
+    );
+    console.log(
+      "The stock dsh UI installer installed and enabled the Copilot bundle.",
+    );
+    await stop();
+    rpc = await start();
+  }
   const created = await rpc("session/create", { request: { cwd: workspace } });
   sessionId = created.sessionId;
   console.log("Web session created with the replacement driver.");
@@ -206,6 +250,24 @@ try {
     "No real tool result was projected",
   );
   console.log("Real Copilot tool execution was projected into dsh history.");
+  if (installPlugin) {
+    const disabled = await rpc("pluginManager/setBundleEnabled", {
+      name: "dsh-agent-copilot",
+      enabled: false,
+    });
+    assert.ok(
+      ["applied", "restart-required"].includes(disabled.application),
+      JSON.stringify(disabled),
+    );
+    await stop();
+    rpc = await start();
+    const bundles = await rpc("pluginManager/listBundles", {});
+    assert.equal(
+      bundles.find((bundle) => bundle.name === "dsh-agent-copilot")?.enabled,
+      false,
+    );
+    console.log("Disabling the bundle restored a bootable native dsh profile.");
+  }
 } finally {
   await stop();
   if (sessionId) {

@@ -7,7 +7,39 @@ GitHub Copilot CLI owns model execution, tools, and conversation context.
 This is not a DeepSeek-compatible API proxy or an embedded terminal running the
 Copilot TUI. It uses the official Copilot SDK to drive an installed Copilot CLI.
 
-## Run from this checkout
+## Install through dsh's UI
+
+Requirements: **dsh 0.2.1-rc.3**, Node.js 24+, and an installed, authenticated
+Copilot CLI available to the process running dsh. The usual dsh plugin installer
+also requires pnpm. Configure its permitted registry as you normally would.
+
+In dsh's plugin manager, choose **Add Plugin** and paste:
+
+```text
+https://github.com/leoncao1215/dsh-copilot-cli
+```
+
+Install and enable the bundle, then restart dsh before creating a new session.
+The bundle disables the native agent loop and LLM title generator, loads the
+Copilot driver, and selects `copilot-cli / auto` as the default. No checkout,
+manual build, npm publication, or `start.ps1` is needed for this installation.
+Compiled `dist` files are included in Git so the plugin itself needs no install
+scripts or build-script approval.
+If pnpm asks about a native dependency's build script (for example `koffi` from
+the SDK), use dsh's normal review/approve-and-retry flow for that dependency.
+
+Configure `cliPath`, `model`, `permission`, and `turnTimeoutMs` on the
+`copilot-agent-driver` plugin entry if needed. The standalone launcher's
+`DSH_COPILOT_*` variables do not configure a UI-installed bundle.
+
+This replaces the agent driver for the **whole selected dsh profile**, not just
+one session. Existing native dsh conversations cannot be resumed as Copilot
+conversations; create new sessions after switching. Disable this bundle and
+restart dsh to restore the underlying native-driver configuration. Later
+profile/user overrides take precedence over a bundle; remove conflicting
+overrides if both drivers are enabled or the default provider stays unchanged.
+
+## Run from this checkout instead
 
 Requirements: Node.js 24+, npm, and an installed, authenticated Copilot CLI
 available on `PATH`. Confirm that Copilot works normally before launching.
@@ -92,6 +124,9 @@ connected browser to answer.
 
 ## Development
 
+Rebuild and commit `dist` together with source changes: GitHub installs use these
+checked-in artifacts directly rather than running a compiler on the user's host.
+
 ```powershell
 npm run typecheck
 npm test
@@ -106,3 +141,9 @@ tool call. It uses temporary state under `.smoke`, grants only reads of its exac
 temporary marker file through a test-only answerer, and removes its created
 Copilot session afterward. It consumes normal Copilot requests and does not test
 browser rendering or interactive approval clicks.
+
+`npm run smoke:install` starts an unmodified dsh Web profile and calls the same
+plugin-manager API used by Add Plugin with the GitHub URL. It then restarts,
+runs the conversation/tool checks, and disables the bundle to check recovery.
+Set `DSH_COPILOT_INSTALL_SPEC` to an absolute package tarball path to exercise
+unpublished changes through that same installer.

@@ -1,12 +1,20 @@
 {
   "name": "dsh-agent-copilot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Use the GitHub Copilot CLI runtime as the DeepSeek Harness agent driver.",
   "type": "module",
-  "exports": "./dist/index.js",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "copilot.patch.json",
     "scripts",
     "start.ps1",
     "README.md"
@@ -15,13 +23,24 @@
     "node": ">=24",
     "dsh": "0.2.1-rc.3"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leoncao1215/dsh-copilot-cli.git"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./copilot.patch.json"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "smoke": "npm run build && node scripts/smoke.mjs",
-    "format": "prettier --write src test scripts package.json tsconfig.json README.md",
-    "lint": "prettier --check src test scripts package.json tsconfig.json README.md",
+    "smoke:install": "npm run build && node scripts/smoke.mjs --install-plugin",
+    "format": "prettier --write src test scripts package.json copilot.patch.json tsconfig.json README.md",
+    "lint": "prettier --check src test scripts package.json copilot.patch.json tsconfig.json README.md",
     "start": "node scripts/start.mjs"
   },
   "dependencies": {
@@ -46,6 +65,7 @@
     "@deepseek-ai/dsh": "0.2.1-rc.3",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.1-rc.3",
     "@types/node": "^24.0.0",
+    "pnpm": "12.15.0",
     "prettier": "^3.6.2",
     "tsx": "^4.20.0",
     "typescript": "^5.9.3"

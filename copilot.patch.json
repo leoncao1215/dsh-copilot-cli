@@ -1,0 +1,22 @@
+[
+  { "id": "agent-loop", "disabled": true },
+  { "id": "session-title-llm", "disabled": true },
+  {
+    "id": "agent-default-model",
+    "config": { "provider": "copilot-cli", "model": "auto" }
+  },
+  {
+    "insert": [
+      {
+        "id": "copilot-agent-driver",
+        "name": "dsh-agent-copilot",
+        "config": {
+          "cliPath": "copilot",
+          "model": "auto",
+          "permission": "ask",
+          "turnTimeoutMs": 1800000
+        }
+      }
+    ]
+  }
+]
