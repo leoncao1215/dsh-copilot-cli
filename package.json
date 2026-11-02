@@ -1,0 +1,53 @@
+{
+  "name": "dsh-agent-copilot",
+  "version": "0.1.0",
+  "description": "Use the GitHub Copilot CLI runtime as the DeepSeek Harness agent driver.",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "scripts",
+    "start.ps1",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24",
+    "dsh": "0.2.1-rc.3"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "format": "prettier --write src test scripts package.json tsconfig.json README.md",
+    "lint": "prettier --check src test scripts package.json tsconfig.json README.md",
+    "start": "node scripts/start.mjs"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.28",
+    "zod": "4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-scope": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-session-persistence": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-user-approval": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-user-questions": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-working-directory": "0.2.1-rc.3",
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.1-rc.3",
+    "@types/node": "^24.0.0",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  }
+}
