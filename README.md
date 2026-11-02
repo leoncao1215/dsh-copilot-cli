@@ -110,6 +110,15 @@ and permission callbacks re-read it so changes apply to subsequent requests,
 including within a running turn. Requests for permission can wait for a
 connected browser to answer.
 
+The driver requests detailed reasoning summaries where the model supports them
+and handles both incremental and complete reasoning events. Runtime intent,
+tool progress, and subagent start/completion/failure appear as labeled context
+notices in the session. Subagent responses and exposed reasoning are shown
+separately from the main answer, with streaming fragments batched at paragraph,
+size, or time boundaries. These display-only notices are persisted but are not
+sent back to Copilot as instructions. Only reasoning actually exposed by the
+runtime can be displayed; model support varies.
+
 ## Current boundaries
 
 - Pinned to **dsh 0.2.1-rc.3** and **Copilot SDK 1.0.28**. Newer dsh factory and
@@ -122,13 +131,16 @@ connected browser to answer.
   mode/policy combination is mapped to automatic tool approval; a dsh
   workspace-write badge is not a Copilot sandbox guarantee. Copilot runtime and
   organization restrictions still apply.
-- One dsh step represents a complete SDK prompt execution, potentially including
-  multiple model/tool iterations. Steering is queued for the next prompt, not
-  injected into an in-progress Copilot model step.
-- Root tool events use generic presentation. Nested subagent streams, rich native
-  tool renderers, token/cost accounting, and full TUI feature parity are not
-  implemented. Other dsh model providers may remain visible, but this driver
-  accepts only the Copilot CLI provider.
+- Each settled main-assistant message has its own dsh presentation step, kept
+  open until its tool calls settle. Runtime notices may also occupy a step;
+  these are presentation boundaries, not exact Copilot model-call accounting.
+  Steering is queued for the next prompt, not injected into an in-progress
+  Copilot model step.
+- Root tool events use generic presentation. Subagent activity is displayed as
+  labeled notices, not native dsh child sessions or nested tool renderers.
+  Token/cost accounting and full TUI feature parity are not implemented.
+  Other dsh model providers may remain visible, but this driver accepts only
+  the Copilot CLI provider.
 
 ## Development
 

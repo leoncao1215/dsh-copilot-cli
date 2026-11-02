@@ -317,7 +317,8 @@ export class CopilotAgent implements Agent {
       } finally {
         unsubscribe?.();
         transcript?.finish(reason.kind !== "completed");
-        if (stepOpen) this.session.append("step/end", { turn, step: 1 });
+        if (stepOpen && !transcript)
+          this.session.append("step/end", { turn, step: 1 });
         this.session.append("turn/end", { turn, reason });
         this.controller = undefined;
       }

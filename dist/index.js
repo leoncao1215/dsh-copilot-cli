@@ -257,7 +257,8 @@ export class CopilotDriver {
                 process.cwd(),
             model: agent.options.model,
             streaming: true,
-            includeSubAgentStreamingEvents: false,
+            reasoningSummary: "detailed",
+            includeSubAgentStreamingEvents: true,
             onPermissionRequest: async (request) => {
                 if (this.config.permission === "deny" ||
                     agent.signal?.aborted ||

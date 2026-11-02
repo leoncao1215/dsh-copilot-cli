@@ -281,7 +281,7 @@ export class CopilotAgent {
             finally {
                 unsubscribe?.();
                 transcript?.finish(reason.kind !== "completed");
-                if (stepOpen)
+                if (stepOpen && !transcript)
                     this.session.append("step/end", { turn, step: 1 });
                 this.session.append("turn/end", { turn, reason });
                 this.controller = undefined;

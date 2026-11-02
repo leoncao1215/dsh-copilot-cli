@@ -51,13 +51,14 @@ class FakeSession {
       this.listeners.delete(listener);
     };
   };
-  emit(type: string, data: object) {
+  emit(type: string, data: object, agentId?: string) {
     const event = {
       type,
       data,
       id: randomUUID(),
       timestamp: new Date().toISOString(),
       parentId: null,
+      ...(agentId ? { agentId } : {}),
     } as SessionEvent;
     for (const listener of this.listeners) listener(event);
   }
@@ -132,6 +133,22 @@ test("projects streamed text and tool results, persists history, and resumes the
     meta: { cwd: process.cwd() },
   });
   const remote = runtime.sessions.get(copilotSessionId(id))!;
+  const starts: number[] = [];
+  const previousStepsClosed: boolean[] = [];
+  ctx.on("agent/assistant-stream", ({ frame }) => {
+    if (frame.type !== "start") return;
+    starts.push(frame.step);
+    if (starts.length > 1) {
+      previousStepsClosed.push(
+        handle.agent.session
+          .snapshotEvents()
+          .some(
+            (event) =>
+              event.type === "step/end" && event.data.step === starts.at(-2),
+          ),
+      );
+    }
+  });
   remote.send = async (session) => {
     session.emit("assistant.message_delta", {
       messageId: "m1",
@@ -153,6 +170,10 @@ test("projects streamed text and tool results, persists history, and resumes the
       toolName: "read_file",
       arguments: { path: "README.md" },
     });
+    session.emit("tool.execution_progress", {
+      toolCallId: "t1",
+      progressMessage: "Reading the file",
+    });
     session.emit("tool.execution_complete", {
       toolCallId: "t1",
       success: true,
@@ -167,6 +188,12 @@ test("projects streamed text and tool results, persists history, and resumes the
   assert.deepEqual(
     messages.map((event) => joinAssistantStreamText(event.data.stream)),
     ["checking", "finished"],
+  );
+  assert.deepEqual(starts, [1, 2]);
+  assert.deepEqual(previousStepsClosed, [true]);
+  assert.deepEqual(
+    messages.map((event) => event.data.step),
+    [1, 2],
   );
   assert.equal(before.filter((event) => event.type === "tool/call").length, 1);
   assert.equal(
@@ -194,6 +221,260 @@ test("projects streamed text and tool results, persists history, and resumes the
   assert.deepEqual(
     turns.map((event) => event.data.turn),
     [1, 2],
+  );
+});
+
+test("projects complete reasoning, separate reasoning blocks, and final-message fallbacks without duplication", async (t) => {
+  const { ctx, runtime } = await fixture(t);
+  const handle = await ctx.agents.create({
+    sessionId: SessionId(randomUUID()),
+  });
+  const remote = runtime.sessions.get(copilotSessionId(handle.agent.id))!;
+  remote.send = async (session) => {
+    session.emit("assistant.reasoning_delta", {
+      reasoningId: "r1",
+      deltaContent: "first ",
+    });
+    for (let i = 0; i < 2; i++)
+      session.emit("assistant.reasoning", {
+        reasoningId: "r1",
+        content: "first thought",
+      });
+    session.emit("assistant.reasoning_delta", {
+      reasoningId: "r1",
+      deltaContent: "late duplicate",
+    });
+    session.emit("assistant.reasoning", {
+      reasoningId: "r2",
+      content: "second thought",
+    });
+    session.emit("assistant.message", {
+      messageId: "m1",
+      content: "working",
+      reasoningText: "first thoughtsecond thought",
+    });
+    session.emit("assistant.reasoning_delta", {
+      reasoningId: "r3",
+      deltaContent: "partial",
+    });
+    session.emit("assistant.message", {
+      messageId: "m2",
+      content: "checked",
+      reasoningText: "partial finalized",
+    });
+    session.emit("assistant.message", {
+      messageId: "m3",
+      content: "done",
+      reasoningText: "fallback thought",
+    });
+    session.emit("assistant.reasoning", {
+      reasoningId: "r4",
+      content: "standalone thought",
+    });
+  };
+  handle.agent.followup(prompt("inspect reasoning"));
+  await handle.agent.whenIdle();
+  const events = handle.agent.session.snapshotEvents();
+  const messages = events.filter((event) => event.type === "assistant/message");
+  assert.deepEqual(
+    messages.map((event) =>
+      event.data.message.content
+        .filter((block) => block.type === "reasoning")
+        .map((block) => block.text)
+        .join(""),
+    ),
+    [
+      "first thoughtsecond thought",
+      "partial finalized",
+      "fallback thought",
+      "standalone thought",
+    ],
+  );
+  assert.deepEqual(
+    messages[0].data.message.content
+      .filter((block) => block.type === "reasoning")
+      .map((block) => block.text),
+    ["first thought", "second thought"],
+  );
+  assert.deepEqual(
+    messages.map((event) => event.data.step),
+    [1, 2, 3, 4],
+  );
+  assert.equal(events.at(-1)?.type, "turn/end");
+  assert.deepEqual(events.at(-1)?.data.reason, { kind: "completed" });
+});
+
+test("streams labeled runtime and parallel subagent progress without mixing it into the main response", async (t) => {
+  const { ctx, runtime } = await fixture(t);
+  const handle = await ctx.agents.create({
+    sessionId: SessionId(randomUUID()),
+  });
+  const remote = runtime.sessions.get(copilotSessionId(handle.agent.id))!;
+  let liveToolProgress = false;
+  remote.send = async (session) => {
+    for (let i = 0; i < 2; i++)
+      session.emit("assistant.intent", { intent: "Searching sources" });
+    session.emit("subagent.started", {
+      toolCallId: "spawn-a",
+      agentName: "explore",
+      agentDisplayName: "Explorer",
+      agentDescription: "Inspecting sources",
+    });
+    session.emit("assistant.reasoning", {
+      reasoningId: "root-reasoning",
+      content: "main thought",
+    });
+    session.emit(
+      "assistant.reasoning_delta",
+      { reasoningId: "child-reasoning", deltaContent: "child thought" },
+      "worker-a",
+    );
+    session.emit(
+      "assistant.reasoning",
+      { reasoningId: "child-reasoning", content: "child thought" },
+      "worker-a",
+    );
+    session.emit(
+      "assistant.message_delta",
+      { messageId: "child-message", deltaContent: "worker \n\n" },
+      "worker-a",
+    );
+    session.emit(
+      "assistant.message",
+      { messageId: "other-child", content: "another worker response" },
+      "worker-b",
+    );
+    session.emit("assistant.message", {
+      messageId: "root-first",
+      content: "still working",
+      reasoningText: "main thought",
+    });
+    session.emit(
+      "assistant.message_delta",
+      { messageId: "child-message", deltaContent: "done" },
+      "worker-a",
+    );
+    for (let i = 0; i < 2; i++)
+      session.emit(
+        "assistant.message",
+        {
+          messageId: "child-message",
+          content: "worker \n\ndone",
+          reasoningText: "child thought",
+        },
+        "worker-a",
+      );
+    session.emit(
+      "tool.execution_start",
+      { toolCallId: "nested-tool", toolName: "read_file" },
+      "worker-b",
+    );
+    session.emit(
+      "tool.execution_progress",
+      { toolCallId: "nested-tool", progressMessage: "Reading sources" },
+      "worker-b",
+    );
+    liveToolProgress = handle.agent.session
+      .snapshotEvents()
+      .some(
+        (event) =>
+          event.type === "developer/message" &&
+          event.data.message.content.some(
+            (block) =>
+              block.type === "text" && block.text.includes("Reading sources"),
+          ),
+      );
+    session.emit("tool.execution_complete", {
+      toolCallId: "nested-tool",
+      success: true,
+      result: { content: "read" },
+    });
+    session.emit("subagent.started", {
+      toolCallId: "legacy-child",
+      agentName: "task",
+      agentDisplayName: "Legacy worker",
+      agentDescription: "Checking legacy event attribution",
+    });
+    session.emit("assistant.reasoning_delta", {
+      parentToolCallId: "legacy-child",
+      reasoningId: "legacy-reasoning",
+      deltaContent: "legacy ",
+    });
+    session.emit("assistant.message", {
+      parentToolCallId: "legacy-child",
+      messageId: "legacy-message",
+      content: "legacy answer",
+      reasoningText: "legacy thought",
+    });
+    session.emit(
+      "session.error",
+      { message: "child-specific warning" },
+      "worker-b",
+    );
+    session.emit("subagent.completed", {
+      toolCallId: "spawn-a",
+      agentName: "explore",
+      agentDisplayName: "Explorer",
+    });
+    session.emit("subagent.failed", {
+      toolCallId: "spawn-b",
+      agentName: "task",
+      agentDisplayName: "Runner",
+      error: "command failed",
+    });
+    session.emit("subagent.completed", {
+      toolCallId: "spawn-c",
+      agentName: "task",
+      agentDisplayName: "Cancelled runner",
+      cancelled: true,
+    });
+    session.emit("assistant.message", {
+      messageId: "root-final",
+      content: "finished",
+    });
+    session.emit("assistant.intent", { intent: "Wrapping up" });
+  };
+  handle.agent.followup(prompt("delegate"));
+  await handle.agent.whenIdle();
+  const events = handle.agent.session.snapshotEvents();
+  const messages = events.filter((event) => event.type === "assistant/message");
+  assert.deepEqual(
+    messages.map((event) => joinAssistantStreamText(event.data.stream)),
+    ["still working", "finished"],
+  );
+  const notices = events
+    .filter((event) => event.type === "developer/message")
+    .flatMap((event) => event.data.message.content)
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  assert.equal(notices.match(/Searching sources/g)?.length, 1);
+  assert.equal(notices.match(/child thought/g)?.length, 1);
+  assert.equal(notices.match(/worker /g)?.length, 2);
+  assert.equal(notices.match(/legacy thought/g)?.length, 1);
+  assert.match(notices, /\[Copilot subagent Legacy worker: response\]/);
+  assert.match(notices, /\[Copilot subagent worker-a: response\]/);
+  assert.match(notices, /\[Copilot subagent worker-b: response\]/);
+  assert.match(notices, /Explorer: started/);
+  assert.match(notices, /Explorer: completed/);
+  assert.match(notices, /Runner: failed.*command failed/);
+  assert.match(notices, /Cancelled runner: cancelled/);
+  assert.match(notices, /worker-b: error.*child-specific warning/);
+  assert.match(notices, /worker-b tool read_file: started/);
+  assert.equal(liveToolProgress, true);
+  assert.equal(events.filter((event) => event.type === "tool/call").length, 0);
+  assert.equal(
+    messages.at(-1)!.data.step,
+    events.filter((event) => event.type === "step/start").at(-1)!.data.step,
+  );
+  assert.deepEqual(events.at(-1)?.data.reason, { kind: "completed" });
+  await handle.dispose();
+  const resumed = await ctx.agents.resume({
+    resumeSessionId: handle.agent.id,
+  });
+  assert.deepEqual(
+    resumed.agent.session.snapshotEvents().slice(0, events.length),
+    events,
   );
 });
 
@@ -244,7 +525,7 @@ test("isolates sessions and serializes queued prompts within a session", async (
   assert.equal(runtime.configs[1].workingDirectory, tmpdir());
 });
 
-test("cancellation retains streamed output and closes unfinished tools", async (t) => {
+test("cancellation retains streamed text and complete reasoning", async (t) => {
   const { ctx, runtime } = await fixture(t);
   const handle = await ctx.agents.create({
     sessionId: SessionId(randomUUID()),
@@ -257,13 +538,13 @@ test("cancellation retains streamed output and closes unfinished tools", async (
     stopped.resolve();
   };
   remote.send = async (session) => {
+    session.emit("assistant.reasoning", {
+      reasoningId: "partial-reasoning",
+      content: "delivered thought",
+    });
     session.emit("assistant.message_delta", {
       messageId: "partial",
       deltaContent: "partial answer",
-    });
-    session.emit("tool.execution_start", {
-      toolCallId: "unfinished",
-      toolName: "shell",
     });
     started.resolve();
     await stopped.promise;
@@ -280,11 +561,57 @@ test("cancellation retains streamed output and closes unfinished tools", async (
       .interrupted,
     true,
   );
-  assert.equal(
-    events.find((event) => event.type === "tool/result")?.data.message.isError,
-    true,
+  assert.ok(
+    events
+      .find((event) => event.type === "assistant/message")
+      ?.data.message.content.some(
+        (block) =>
+          block.type === "reasoning" && block.text === "delivered thought",
+      ),
   );
   assert.equal(remote.listeners.size, 0);
+});
+
+test("closes declared, unannounced, and unstarted tools before ending an interrupted step", async (t) => {
+  for (const mode of ["declared", "tool-start-only", "not-started"]) {
+    await t.test(mode, async (t) => {
+      const { ctx, runtime } = await fixture(t);
+      const handle = await ctx.agents.create({
+        sessionId: SessionId(randomUUID()),
+      });
+      const remote = runtime.sessions.get(copilotSessionId(handle.agent.id))!;
+      remote.send = async (session) => {
+        if (mode !== "tool-start-only")
+          session.emit("assistant.message", {
+            messageId: "tool-message",
+            content: "running",
+            toolRequests: [{ toolCallId: "unfinished", name: "shell" }],
+          });
+        if (mode !== "not-started")
+          session.emit("tool.execution_start", {
+            toolCallId: "unfinished",
+            toolName: "shell",
+          });
+        handle.agent.cancel({ kind: "user" });
+      };
+      handle.agent.followup(prompt("run tool"));
+      await handle.agent.whenIdle();
+      const events = handle.agent.session.snapshotEvents();
+      assert.equal(
+        events.find((event) => event.type === "tool/result")?.data.message
+          .isError,
+        true,
+      );
+      await handle.dispose();
+      const resumed = await ctx.agents.resume({
+        resumeSessionId: handle.agent.id,
+      });
+      assert.deepEqual(
+        resumed.agent.session.snapshotEvents().slice(0, events.length),
+        events,
+      );
+    });
+  }
 });
 
 test("rejects permission requests outside a running turn", async (t) => {
